@@ -1,64 +1,73 @@
-// VICE CITY: Rise of Crime — shared game state + tiny event emitter.
-// One object every later system reads and mutates: cash, health, wanted,
-// ammo, plus crime/shot/cash/health events for HUD, audio and police.
-window.VC = window.VC || {};
+'use strict';
+/* VICE CITY: Rise of Crime — game state (chunk C1).
+   VC.createState() -> central mutable state + tiny event emitter.
+   commitCrime() only COUNTS and emits 'crime'; it never touches wanted
+   (the police module owns the wanted level). */
+(function () {
+  window.VC = window.VC || {};
 
-VC.createState = function () {
-  var listeners = {};
+  function createState() {
+    var listeners = {}; // event -> [fn]
 
-  var state = {
-    cash: 250,
-    health: 100,
-    maxHealth: 100,
-    wanted: 0,        // 0..5, may be fractional; HUD shows Math.ceil
-    ammo: 60,         // rounds ready to fire (combat chunk manages reloads)
-    reserveAmmo: 240, // spare rounds carried
-    kills: 0,
-    crimes: 0,
+    var state = {
+      cash: 250,
+      health: 100,       // 0..100
+      wanted: 0,         // 0..5 float, owned by police
+      ammo: 60,
+      reserveAmmo: 240,
+      kills: 0,
+      crimes: 0
+    };
 
-    on: function (evt, fn) {
-      (listeners[evt] = listeners[evt] || []).push(fn);
-      return state;
-    },
+    state.on = function (ev, fn) {
+      if (!listeners[ev]) listeners[ev] = [];
+      listeners[ev].push(fn);
+    };
 
-    off: function (evt, fn) {
-      var arr = listeners[evt];
-      if (!arr) return state;
+    state.off = function (ev, fn) {
+      var arr = listeners[ev];
+      if (!arr) return;
       var i = arr.indexOf(fn);
       if (i >= 0) arr.splice(i, 1);
-      return state;
-    },
+    };
 
-    emit: function (evt, data) {
-      var arr = listeners[evt];
-      if (!arr) return state;
-      // copy so handlers may unsubscribe while we iterate
-      var copy = arr.slice();
-      for (var i = 0; i < copy.length; i++) copy[i](data, state);
-      return state;
-    },
+    state.emit = function (ev, payload) {
+      var arr = listeners[ev];
+      if (!arr) return;
+      arr = arr.slice();
+      for (var i = 0; i < arr.length; i++) {
+        try { arr[i](payload); } catch (e) { /* listener errors never break the game */ }
+      }
+    };
 
-    // Convenience mutators that keep the event stream honest.
-    addCash: function (amount) {
-      state.cash += amount;
-      state.emit('cash', { amount: amount, total: state.cash });
-    },
+    state.addCash = function (n) {
+      state.cash += n;
+      state.emit('cash', state.cash);
+    };
 
-    damage: function (amount) {
-      state.health = Math.max(0, state.health - amount);
-      state.emit('health', { amount: -amount, total: state.health });
-    },
+    state.damage = function (n) {
+      state.health -= n;
+      if (state.health < 0) state.health = 0;
+      if (state.health > 100) state.health = 100;
+      state.emit('health', state.health);
+    };
 
-    heal: function (amount) {
-      state.health = Math.min(state.maxHealth, state.health + amount);
-      state.emit('health', { amount: amount, total: state.health });
-    },
+    state.heal = function (n) {
+      state.health += n;
+      if (state.health > 100) state.health = 100;
+      if (state.health < 0) state.health = 0;
+      state.emit('health', state.health);
+    };
 
-    commitCrime: function (level, kind) {
+    /* Count a crime and tell the world. Wanted is NOT changed here:
+       police subscribes to 'crime' and decides the response. */
+    state.commitCrime = function (level, kind) {
       state.crimes += 1;
-      state.emit('crime', { level: level || 1, kind: kind || 'generic' });
-    }
-  };
+      state.emit('crime', { level: level, kind: kind });
+    };
 
-  return state;
-};
+    return state;
+  }
+
+  window.VC.createState = createState;
+})();

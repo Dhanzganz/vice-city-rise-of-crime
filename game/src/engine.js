@@ -1,114 +1,131 @@
-// VICE CITY: Rise of Crime — engine: renderer, lights, day cycle.
-// Classic script on the VC namespace; Three.js r147 UMD is loaded before this file.
+'use strict';
+/* VICE CITY: Rise of Crime — engine.js
+ * VC.createEngine(mount): renderer, scene, camera, lights and the day cycle.
+ * timeOfDay runs [0,1): 0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk.
+ * A full day lasts 240 s unless frozen. Sky, fog, sun and hemisphere light
+ * are keyframed across the phases; onDay subscribers get a nightFactor
+ * (0 = full day, 1 = deep night) whenever it changes materially. */
 window.VC = window.VC || {};
 
-VC.createEngine = function (canvas) {
-  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+VC.createEngine = function (mount) {
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(mount.clientWidth || window.innerWidth, mount.clientHeight || window.innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
+  mount.appendChild(renderer.domElement);
 
-  var scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x87bfe8);
-  scene.fog = new THREE.Fog(0xbfe3f5, 180, 900);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.FogExp2(0x87ceeb, 0.0016);
 
-  var camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
-  camera.position.set(30, 18, 60);
+  const camera = new THREE.PerspectiveCamera(62, (mount.clientWidth || window.innerWidth) / (mount.clientHeight || window.innerHeight), 0.1, 900);
+  camera.position.set(0, 8, 14);
 
-  var hemi = new THREE.HemisphereLight(0xcfe8ff, 0x8a7a5f, 0.55);
+  const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 0.75);
   scene.add(hemi);
 
-  var sun = new THREE.DirectionalLight(0xffffff, 1.1);
+  const sun = new THREE.DirectionalLight(0xffffff, 1.15);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -300; sun.shadow.camera.right = 300;
-  sun.shadow.camera.top = 300; sun.shadow.camera.bottom = -300;
-  sun.shadow.camera.near = 10; sun.shadow.camera.far = 900;
+  sun.shadow.camera.left = -180;
+  sun.shadow.camera.right = 180;
+  sun.shadow.camera.top = 180;
+  sun.shadow.camera.bottom = -180;
+  sun.shadow.camera.near = 10;
+  sun.shadow.camera.far = 700;
   sun.shadow.bias = -0.0006;
   scene.add(sun);
   scene.add(sun.target);
 
-  // Day keyframes: [hour, sky, fog, sunIntensity, sunColor, hemiIntensity]
-  var STOPS = [
-    [0.0,  0x0a0e24, 0x0a0e24, 0.10, 0x8fb2ff, 0.12],
-    [5.0,  0x0a0e24, 0x0d1130, 0.10, 0x8fb2ff, 0.12],
-    [6.5,  0xffb36b, 0xf7a56b, 0.50, 0xffb36b, 0.30],
-    [9.0,  0x8ec9ee, 0xbfe3f5, 1.05, 0xfff3d6, 0.55],
-    [13.0, 0x87bfe8, 0xbfe3f5, 1.15, 0xffffff, 0.60],
-    [17.0, 0x93c4e8, 0xc4dff2, 0.95, 0xffe9c4, 0.50],
-    [18.8, 0xff8a5f, 0xff9e7d, 0.55, 0xff7e47, 0.32],
-    [20.0, 0x3b2d5c, 0x463a6b, 0.10, 0x8fb2ff, 0.16],
-    [21.5, 0x0a0e24, 0x0d1130, 0.10, 0x8fb2ff, 0.12],
-    [24.0, 0x0a0e24, 0x0a0e24, 0.10, 0x8fb2ff, 0.12]
+  /* Keyframes: t, sky, fog, sun colour, sun intensity, sun elevation (rad),
+   * sun azimuth (rad), hemi intensity, nightFactor. */
+  const KEYS = [
+    { t: 0.00, sky: 0x0b1026, fog: 0x0b1026, sunC: 0x8fb4ff, sunI: 0.12, elev: -0.35, azim: 0.6, hemi: 0.22, night: 1.0 },
+    { t: 0.21, sky: 0x131a3a, fog: 0x131a3a, sunC: 0x9db8ff, sunI: 0.14, elev: -0.06, azim: 0.9, hemi: 0.26, night: 0.95 },
+    { t: 0.27, sky: 0xe8a34c, fog: 0xe8b06a, sunC: 0xffb45e, sunI: 0.75, elev: 0.16, azim: 1.15, hemi: 0.5, night: 0.35 },
+    { t: 0.36, sky: 0x87bfe8, fog: 0x9fc8e8, sunC: 0xffe9b8, sunI: 1.15, elev: 0.7, azim: 1.7, hemi: 0.75, night: 0.0 },
+    { t: 0.50, sky: 0x87ceeb, fog: 0xaad4ee, sunC: 0xffffff, sunI: 1.25, elev: 1.25, azim: 2.6, hemi: 0.8, night: 0.0 },
+    { t: 0.64, sky: 0x86bde6, fog: 0x9fc4e4, sunC: 0xffe4ae, sunI: 1.1, elev: 0.65, azim: 3.5, hemi: 0.72, night: 0.0 },
+    { t: 0.73, sky: 0xf07f4a, fog: 0xe88a5e, sunC: 0xff8a4a, sunI: 0.8, elev: 0.14, azim: 4.1, hemi: 0.5, night: 0.3 },
+    { t: 0.79, sky: 0x53355e, fog: 0x53355e, sunC: 0xd98ab0, sunI: 0.3, elev: -0.05, azim: 4.4, hemi: 0.32, night: 0.8 },
+    { t: 0.85, sky: 0x0e1430, fog: 0x0e1430, sunC: 0x8fb4ff, sunI: 0.13, elev: -0.3, azim: 4.8, hemi: 0.23, night: 1.0 },
+    { t: 1.00, sky: 0x0b1026, fog: 0x0b1026, sunC: 0x8fb4ff, sunI: 0.12, elev: -0.35, azim: 0.6, hemi: 0.22, night: 1.0 }
   ];
-  var skyA = new THREE.Color(), skyB = new THREE.Color();
-  var fogA = new THREE.Color(), fogB = new THREE.Color();
-  var sunA = new THREE.Color(), sunB = new THREE.Color();
 
-  function lerpStops(hour) {
-    var i = 0;
-    while (i < STOPS.length - 2 && hour >= STOPS[i + 1][0]) i++;
-    var a = STOPS[i], b = STOPS[i + 1];
-    var f = Math.min(1, Math.max(0, (hour - a[0]) / (b[0] - a[0])));
-    skyA.setHex(a[1]); skyB.setHex(b[1]); scene.background.copy(skyA).lerp(skyB, f);
-    fogA.setHex(a[2]); fogB.setHex(b[2]); scene.fog.color.copy(fogA).lerp(fogB, f);
-    sunA.setHex(a[4]); sunB.setHex(b[4]); sun.color.copy(sunA).lerp(sunB, f);
-    sun.intensity = a[3] + (b[3] - a[3]) * f;
-    hemi.intensity = a[5] + (b[5] - a[5]) * f;
+  let timeOfDay = 0.34;
+  let frozen = false;
+  let lastNight = -1;
+  const subs = [];
+  const cA = new THREE.Color(), cB = new THREE.Color();
+
+  function lerp(a, b, f) { return a + (b - a) * f; }
+  function lerpColor(target, hexA, hexB, f) {
+    cA.setHex(hexA); cB.setHex(hexB);
+    target.copy(cA).lerp(cB, f);
   }
 
-  function nightFactorFor(hour) {
-    if (hour <= 5 || hour >= 20.5) return 1;
-    if (hour >= 8.5 && hour <= 17.5) return 0;
-    if (hour < 8.5) return 1 - (hour - 5) / 3.5;
-    return (hour - 17.5) / 3;
-  }
+  function apply() {
+    let i = 0;
+    while (i < KEYS.length - 2 && timeOfDay >= KEYS[i + 1].t) i++;
+    const A = KEYS[i], B = KEYS[i + 1];
+    const span = (B.t - A.t) || 1;
+    const f = Math.min(1, Math.max(0, (timeOfDay - A.t) / span));
 
-  var listeners = [];
-  var time01 = 0.45; // start mid-morning
-  var night = 0;
+    lerpColor(scene.background, A.sky, B.sky, f);
+    lerpColor(scene.fog.color, A.fog, B.fog, f);
+    lerpColor(sun.color, A.sunC, B.sunC, f);
+    sun.intensity = lerp(A.sunI, B.sunI, f);
+    hemi.intensity = lerp(A.hemi, B.hemi, f);
 
-  function applyTime() {
-    var hour = time01 * 24;
-    lerpStops(hour);
-    // Sun path: rises in the east (+X), sets in the west (-X), slight southern tilt.
-    var ang = ((hour - 6) / 12) * Math.PI; // 0 at 06:00, PI at 18:00
-    var elev = Math.sin(ang);
-    if (elev > -0.05) {
-      sun.position.set(Math.cos(ang) * 320, Math.max(elev, 0.04) * 300, 120);
-    } else {
-      // Moon: fixed cool light from the north-east.
-      sun.position.set(140, 260, -180);
+    const elev = lerp(A.elev, B.elev, f);
+    const azim = lerp(A.azim, B.azim, f);
+    const R = 320;
+    sun.position.set(Math.cos(elev) * Math.sin(azim) * R, Math.sin(elev) * R, Math.cos(elev) * Math.cos(azim) * R);
+    /* At night the "sun" is the moon: keep it above the horizon so shadows read. */
+    if (sun.position.y < 40) sun.position.y = 40;
+    sun.target.position.set(0, 0, 0);
+
+    const night = lerp(A.night, B.night, f);
+    if (Math.abs(night - lastNight) > 0.02) {
+      lastNight = night;
+      for (let s = 0; s < subs.length; s++) subs[s](night);
     }
-    night = nightFactorFor(hour);
-    for (var i = 0; i < listeners.length; i++) listeners[i](night);
   }
 
-  var DAY_SECONDS = 480; // one full day = 8 minutes of play
-  var engine = {
+  function onResize() {
+    const w = mount.clientWidth || window.innerWidth;
+    const h = mount.clientHeight || window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  window.addEventListener('resize', onResize);
+
+  apply();
+
+  return {
     renderer: renderer,
     scene: scene,
     camera: camera,
-    setTimeOfDay: function (t) { time01 = ((t % 1) + 1) % 1; applyTime(); },
-    getTimeOfDay: function () { return time01; },
-    onDay: function (fn) { listeners.push(fn); fn(night); },
+    setTimeOfDay: function (t) {
+      timeOfDay = ((t % 1) + 1) % 1;
+      apply();
+    },
+    getTimeOfDay: function () { return timeOfDay; },
+    setFrozen: function (b) { frozen = !!b; },
+    onDay: function (cb) {
+      subs.push(cb);
+      cb(lastNight < 0 ? 0 : lastNight);
+    },
     update: function (dt) {
-      time01 = (time01 + dt / DAY_SECONDS) % 1;
-      applyTime();
+      if (!frozen && dt > 0) {
+        timeOfDay = (timeOfDay + dt / 240) % 1;
+        apply();
+      }
     }
   };
-  VC.engine = engine;
-
-  window.addEventListener('resize', function () {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-
-  applyTime();
-  return engine;
 };

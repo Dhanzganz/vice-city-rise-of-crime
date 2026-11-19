@@ -1,221 +1,156 @@
-// VICE CITY: Rise of Crime — on-foot combat: hitscan pistol + melee.
-// Q arms/disarms, mouse click fires (or punches when unarmed), F punches,
-// R reloads from the reserve. Shots panic crowds and feed the crime stream;
-// the police module turns crimes into wanted stars.
+// VICE CITY: Rise of Crime — combat.js
+// VC.createCombat(scene, state, player, npcs, audio)
+// Q arms/disarms a handgun shown in the player's hand. Mouse fire is a
+// centre-screen hitscan; F punches. Hits on pedestrians are crimes and
+// panic the crowd; R reloads from the reserve pool.
 window.VC = window.VC || {};
 
-VC.createCombat = function (scene, state, npcs, audio) {
-  var MAX_AMMO = 60;
-  var RANGE = 45;
+VC.createCombat = function (scene, state, player, npcs, audio) {
+  'use strict';
 
-  var armed = true;
-  var fireCd = 0;      // seconds until the next allowed shot
-  var reloadT = 0;     // reload lockout remaining
-  var flashT = 0;      // muzzle-flash light decay
-  var tracerT = 0;     // tracer fade
-  var prevQ = false, prevR = false, prevF = false;
+  var armed = false;
+  var flashTime = 0;
+  var reloading = false;
 
-  // --- effects: one reusable point light + one tracer line ---------------
-  var flash = new THREE.PointLight(0xffb45e, 0, 22, 2);
-  flash.position.set(0, -10, 0);
+  // Gun: a small dark box parented to the player figure.
+  var gun = new THREE.Mesh(
+    new THREE.BoxGeometry(0.12, 0.16, 0.55),
+    new THREE.MeshLambertMaterial({ color: 0x151515 })
+  );
+  gun.position.set(0.45, 1.05, 0.35);
+  gun.visible = false;
+  player.group.add(gun);
+
+  // Muzzle flash light, intensity spikes on fire and decays in update().
+  var flash = new THREE.PointLight(0xffc266, 0, 18);
   scene.add(flash);
 
-  var tracerGeo = new THREE.BufferGeometry();
-  tracerGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-  var tracerMat = new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0 });
-  var tracer = new THREE.Line(tracerGeo, tracerMat);
-  tracer.frustumCulled = false;
-  scene.add(tracer);
-
-  var _dir = new THREE.Vector3();
-  var _rel = new THREE.Vector3();
-
-  function game() { return window.VC.game || null; }
-  function busy() {
-    var g = game();
-    return !g || !!g.driving || !!g.inputLocked;
+  function rayFromCamera() {
+    var game = window.VC.game;
+    var cam = game && game.engine ? game.engine.camera : null;
+    if (!cam) return null;
+    var dir = new THREE.Vector3();
+    cam.getWorldDirection(dir);
+    return { origin: cam.position.clone(), dir: dir };
   }
 
-  // 2D segment vs AABB (slab test) on the XZ plane: true if the segment
-  // touches the box before fraction `tMax` of its length.
-  function segBlocked(x1, z1, x2, z2, b, tMax) {
-    var dx = x2 - x1, dz = z2 - z1;
-    var t0 = 0, t1 = tMax;
-    if (Math.abs(dx) < 1e-8) { if (x1 < b.minX || x1 > b.maxX) return false; }
-    else {
-      var ta = (b.minX - x1) / dx, tb = (b.maxX - x1) / dx;
-      if (ta > tb) { var s = ta; ta = tb; tb = s; }
-      if (ta > t0) t0 = ta;
-      if (tb < t1) t1 = tb;
-      if (t0 > t1) return false;
-    }
-    if (Math.abs(dz) < 1e-8) { if (z1 < b.minZ || z1 > b.maxZ) return false; }
-    else {
-      var tc = (b.minZ - z1) / dz, td = (b.maxZ - z1) / dz;
-      if (tc > td) { var s2 = tc; tc = td; td = s2; }
-      if (tc > t0) t0 = tc;
-      if (td < t1) t1 = td;
-      if (t0 > t1) return false;
-    }
-    return true;
+  // Distance from point p to ray; also returns the along-ray distance.
+  function rayHit(origin, dir, p) {
+    var ox = p.x - origin.x, oy = p.y - origin.y, oz = p.z - origin.z;
+    var t = ox * dir.x + oy * dir.y + oz * dir.z;
+    if (t < 0) return null;
+    var cx = origin.x + dir.x * t, cy = origin.y + dir.y * t, cz = origin.z + dir.z * t;
+    var dx = p.x - cx, dy = p.y - cy, dz = p.z - cz;
+    var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return { t: t, dist: d };
   }
 
-  function losBlocked(x1, z1, x2, z2) {
-    var g = game();
-    var cols = g && g.city ? g.city.colliders : null;
-    if (!cols) return false;
-    for (var i = 0; i < cols.length; i++) {
-      if (segBlocked(x1, z1, x2, z2, cols[i], 0.96)) return true;
-    }
-    return false;
+  function pedPoint(ped) {
+    var p = ped.group.position;
+    return { x: p.x, y: p.y + 1.0, z: p.z };
   }
 
-  // The same down-state npc.js uses when a car runs a ped over.
-  function downPed(p) {
-    p.mode = 'down';
-    p.timer = 6;
-    p.fig.group.rotation.x = -Math.PI / 2;
-    p.fig.group.position.y = 0.25;
+  function downPed(ped) {
+    ped.mode = 'down';
+    ped.timer = 6;
+    ped.group.rotation.x = -Math.PI / 2;
+    ped.group.position.y = 0.25;
   }
 
-  function tryMelee() {
-    var g = game();
-    if (!g || !g.player) return;
-    var pp = g.player.position;
-    var best = null, bd = 1.9;
-    for (var i = 0; i < npcs.peds.length; i++) {
-      var p = npcs.peds[i];
-      if (p.mode === 'down') continue;
-      var gp = p.fig.group.position;
-      var d = Math.hypot(gp.x - pp.x, gp.z - pp.z);
-      if (d < bd) { bd = d; best = p; }
-    }
-    if (best) {
-      downPed(best);
-      audio.punch();
-      state.commitCrime(1, 'assault');
-      npcs.panicAt(pp.x, pp.z, 10);
-    }
-  }
-
-  function fire() {
-    var g = game();
-    if (!g || !g.engine || !g.player) return;
-    var cam = g.engine.camera;
-    cam.getWorldDirection(_dir);
-    var ox = cam.position.x, oy = cam.position.y, oz = cam.position.z;
-    var pp = g.player.position;
-
-    state.ammo -= 1;
-    fireCd = 0.14;
-    audio.shot();
-    npcs.panicAt(pp.x, pp.z, 18);
-
-    // muzzle flash + tracer start just ahead of the camera
-    var mx = ox + _dir.x * 1.4, my = oy + _dir.y * 1.4 - 0.15, mz = oz + _dir.z * 1.4;
-    flash.position.set(mx, my, mz);
-    flash.intensity = 30;
-    flashT = 0.06;
-
-    // nearest ped in the centre cone
-    var bestT = Infinity, bestPed = null;
-    for (var i = 0; i < npcs.peds.length; i++) {
-      var p = npcs.peds[i];
-      if (p.mode === 'down') continue;
-      var gp = p.fig.group.position;
-      _rel.set(gp.x - ox, gp.y + 1.05 - oy, gp.z - oz);
-      var t = _rel.dot(_dir);
-      if (t < 1.5 || t > RANGE) continue;
-      var perp2 = _rel.lengthSq() - t * t;
-      var thr = 0.55 + t * 0.045;
-      if (perp2 < thr * thr && t < bestT) { bestT = t; bestPed = p; }
-    }
-    // nearest car in the cone
-    var carT = Infinity;
-    var veh = g.vehicles;
-    if (veh && veh.cars) {
-      for (var j = 0; j < veh.cars.length; j++) {
-        var cp = veh.cars[j].group.position;
-        _rel.set(cp.x - ox, cp.y + 0.75 - oy, cp.z - oz);
-        var tc = _rel.dot(_dir);
-        if (tc < 1.5 || tc > RANGE) continue;
-        var perpC2 = _rel.lengthSq() - tc * tc;
-        var thrC = 1.9 + tc * 0.03;
-        if (perpC2 < thrC * thrC && tc < carT) carT = tc;
-      }
-    }
-
-    var hitT = RANGE;
-    if (bestPed && bestT < carT) {
-      var bp = bestPed.fig.group.position;
-      if (!losBlocked(pp.x, pp.z, bp.x, bp.z)) {
-        downPed(bestPed);
-        state.kills += 1;
-        state.commitCrime(2, 'shooting');
-        hitT = bestT;
-      }
-    } else if (carT < Infinity) {
-      state.commitCrime(1, 'shotsfired');
-      hitT = carT;
-    } else {
-      state.commitCrime(1, 'shotsfired');
-    }
-
-    var pos = tracerGeo.attributes.position;
-    pos.setXYZ(0, mx, my, mz);
-    pos.setXYZ(1, ox + _dir.x * hitT, oy + _dir.y * hitT, oz + _dir.z * hitT);
-    pos.needsUpdate = true;
-    tracerMat.opacity = 0.9;
-    tracerT = 0.06;
-  }
-
-  function reload() {
-    if (reloadT > 0 || state.ammo >= MAX_AMMO || state.reserveAmmo <= 0) return;
-    var take = Math.min(MAX_AMMO - state.ammo, state.reserveAmmo);
-    state.ammo += take;
-    state.reserveAmmo -= take;
-    reloadT = 0.8;
-    audio.blip();
-  }
-
-  // Mouse fire / punch — clicks on menu overlays never reach the canvas.
-  var canvas = document.getElementById('game');
-  if (canvas) {
-    canvas.addEventListener('mousedown', function (e) {
-      if (e.button !== 0 || busy()) return;
-      if (armed) {
-        if (fireCd <= 0 && reloadT <= 0 && state.ammo > 0) fire();
-        else if (state.ammo <= 0) reload();
+  var combat = {
+    update: function (dt) {
+      if (flashTime > 0) {
+        flashTime -= dt;
+        flash.intensity = Math.max(0, flashTime * 14);
       } else {
-        tryMelee();
+        flash.intensity = 0;
       }
-    });
-  }
+      // Reload on KeyR held.
+      var game = window.VC.game;
+      var keys = game && game.input ? game.input.keys : null;
+      if (keys && keys['KeyR'] && state.reserveAmmo > 0 && state.ammo < 60) {
+        if (!reloading) {
+          reloading = true;
+          var move = Math.min(60 - state.ammo, state.reserveAmmo);
+          state.ammo += move;
+          state.reserveAmmo -= move;
+          if (audio) audio.blip();
+        }
+      } else {
+        reloading = false;
+      }
+    },
 
-  function update(dt, input) {
-    if (fireCd > 0) fireCd -= dt;
-    if (reloadT > 0) reloadT -= dt;
-    if (flashT > 0) { flashT -= dt; if (flashT <= 0) flash.intensity = 0; }
-    if (tracerT > 0) {
-      tracerT -= dt;
-      tracerMat.opacity = Math.max(0, tracerT / 0.06) * 0.9;
+    toggleArmed: function () {
+      armed = !armed;
+      gun.visible = armed;
+      if (audio) audio.blip();
+    },
+
+    fire: function () {
+      if (!armed || state.ammo <= 0) return;
+      state.ammo--;
+      if (audio) audio.shot();
+      var ray = rayFromCamera();
+      if (!ray) return;
+
+      // Muzzle flash at the gun's world position.
+      var gp = new THREE.Vector3();
+      gun.getWorldPosition(gp);
+      flash.position.copy(gp);
+      flashTime = 0.07;
+      flash.intensity = 1;
+
+      var best = null, bestT = Infinity;
+      var peds = npcs.peds || [];
+      for (var i = 0; i < peds.length; i++) {
+        if (peds[i].mode === 'down') continue;
+        var hit = rayHit(ray.origin, ray.dir, pedPoint(peds[i]));
+        if (hit && hit.dist < 1.2 && hit.t < 60 && hit.t < bestT) {
+          best = peds[i];
+          bestT = hit.t;
+        }
+      }
+      if (best) {
+        var ip = best.group.position;
+        downPed(best);
+        state.kills = (state.kills || 0) + 1;
+        state.commitCrime(2, 'shooting');
+        npcs.panicAt(ip.x, ip.z, 12);
+      } else {
+        var ix = ray.origin.x + ray.dir.x * 60;
+        var iz = ray.origin.z + ray.dir.z * 60;
+        npcs.panicAt(ix, iz, 8);
+      }
+    },
+
+    punch: function () {
+      var pp = player.position;
+      var peds = npcs.peds || [];
+      var heading = player.group.rotation.y;
+      var fx = Math.sin(heading), fz = Math.cos(heading);
+      for (var i = 0; i < peds.length; i++) {
+        if (peds[i].mode === 'down') continue;
+        var p = peds[i].group.position;
+        var dx = p.x - pp.x, dz = p.z - pp.z;
+        var d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 2.3) {
+          var dot = d > 0.01 ? (dx * fx + dz * fz) / d : 1;
+          if (dot > 0.2 || d < 0.9) {
+            downPed(peds[i]);
+            state.commitCrime(1, 'assault');
+            if (audio) audio.punch();
+            npcs.panicAt(p.x, p.z, 6);
+            return;
+          }
+        }
+      }
     }
-    if (!input || !input.keys || busy()) { prevQ = prevR = prevF = false; return; }
+  };
 
-    var q = !!input.keys.KeyQ;
-    if (q && !prevQ) { armed = !armed; audio.blip(); }
-    prevQ = q;
+  Object.defineProperty(combat, 'armed', {
+    get: function () { return armed; }
+  });
 
-    var r = !!input.keys.KeyR;
-    if (r && !prevR) reload();
-    prevR = r;
-
-    var f = !!input.keys.KeyF;
-    if (f && !prevF) tryMelee();
-    prevF = f;
-  }
-
-  var api = { update: update };
-  Object.defineProperty(api, 'armed', { get: function () { return armed; } });
-  return api;
+  return combat;
 };

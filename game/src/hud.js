@@ -1,238 +1,230 @@
-// VICE CITY: Rise of Crime — HUD.
-// Minimap, wanted stars, health, cash, ammo/speed, mission banners and
-// the BUSTED / WASTED overlay. All HUD styling lives in the CSS string
-// injected below, so index.html only needs the script tag.
-window.VC = window.VC || {};
+'use strict';
+/* VICE CITY: Rise of Crime — HUD (chunk C1).
+   VC.createHUD(state): DOM overlay — cash + health (top-left), wanted
+   stars (top-right), ammo + speed (bottom-right), minimap (bottom-left),
+   a queued centre banner and BUSTED/WASTED overlays. The initial state
+   is painted synchronously at creation so headless captures are real. */
+(function () {
+  window.VC = window.VC || {};
 
-VC.createHUD = function (state) {
-  var CSS = [
-    '#title,#hint{display:none;}', // legacy overlays make room for the HUD
-    '#vc-hud{position:fixed;inset:0;z-index:10;pointer-events:none;',
-    'font-family:"Segoe UI",Arial,sans-serif;color:#fff;}',
-    '#vc-map{position:absolute;top:16px;left:16px;width:176px;height:176px;',
-    'border:2px solid rgba(255,255,255,0.35);border-radius:10px;',
-    'background:#0b1020;box-shadow:0 4px 18px rgba(0,0,0,0.5);}',
-    '#vc-stars{position:absolute;top:14px;right:20px;font-size:30px;',
-    'letter-spacing:4px;text-shadow:0 2px 6px rgba(0,0,0,0.8);}',
-    '#vc-stars .on{color:#ffd93c;}#vc-stars .off{color:rgba(255,255,255,0.28);}',
-    '#vc-bl{position:absolute;left:16px;bottom:16px;width:230px;}',
-    '#vc-healthwrap{height:14px;background:rgba(0,0,0,0.55);',
-    'border:1px solid rgba(255,255,255,0.4);border-radius:7px;overflow:hidden;}',
-    '#vc-health{height:100%;width:100%;background:#3ddc5a;',
-    'transition:width .18s ease,background .18s ease;}',
-    '#vc-cash{margin-top:7px;font-size:24px;font-weight:800;letter-spacing:1px;',
-    'color:#7dff8a;text-shadow:0 2px 5px rgba(0,0,0,0.85);}',
-    '#vc-cashpop{font-size:16px;font-weight:700;color:#ffe66d;opacity:0;',
-    'margin-left:8px;text-shadow:0 1px 4px rgba(0,0,0,0.8);}',
-    '#vc-br{position:absolute;right:20px;bottom:16px;text-align:right;}',
-    '#vc-ammo{font-size:26px;font-weight:800;letter-spacing:1px;',
-    'text-shadow:0 2px 5px rgba(0,0,0,0.85);}',
-    '#vc-ammo .res{font-size:16px;color:rgba(255,255,255,0.65);font-weight:600;}',
-    '#vc-speed{font-size:15px;font-weight:700;color:#aee7ff;letter-spacing:2px;',
-    'text-shadow:0 1px 4px rgba(0,0,0,0.8);min-height:18px;}',
-    '#vc-banner{position:absolute;top:64px;left:50%;transform:translateX(-50%);',
-    'text-align:center;opacity:0;transition:opacity .35s ease;max-width:72vw;}',
-    '#vc-banner .t{font-size:27px;font-weight:800;letter-spacing:3px;',
-    'color:#ffd93c;text-shadow:0 2px 8px rgba(0,0,0,0.9);}',
-    '#vc-banner .s{font-size:16px;font-weight:600;color:#fff;margin-top:3px;',
-    'text-shadow:0 1px 5px rgba(0,0,0,0.9);}',
-    '#vc-overlay{position:absolute;inset:0;display:none;align-items:center;',
-    'justify-content:center;flex-direction:column;',
-    'background:rgba(5,5,12,0.45);}',
-    '#vc-overlay .big{font-size:84px;font-weight:900;letter-spacing:14px;',
-    'text-shadow:0 4px 24px rgba(0,0,0,0.9);}',
-    '#vc-overlay .sub{font-size:19px;font-weight:600;letter-spacing:2px;',
-    'color:#f2f2f2;text-shadow:0 2px 6px rgba(0,0,0,0.9);margin-top:6px;}'
-  ].join('');
+  var WORLD = { minX: -262, maxX: 262, minZ: -262, maxZ: 286 };
+  var MAP = 176;
 
-  var style = document.createElement('style');
-  style.textContent = CSS;
-  document.head.appendChild(style);
+  function createHUD(state) {
+    var FONT = "'Arial Black', 'Segoe UI', Arial, sans-serif";
 
-  var root = document.createElement('div');
-  root.id = 'vc-hud';
-  root.innerHTML =
-    '<canvas id="vc-map" width="176" height="176"></canvas>' +
-    '<div id="vc-stars"></div>' +
-    '<div id="vc-bl"><div id="vc-healthwrap"><div id="vc-health"></div></div>' +
-    '<div><span id="vc-cash"></span><span id="vc-cashpop"></span></div></div>' +
-    '<div id="vc-br"><div id="vc-speed"></div><div id="vc-ammo"></div></div>' +
-    '<div id="vc-banner"><div class="t"></div><div class="s"></div></div>' +
-    '<div id="vc-overlay"><div class="big"></div><div class="sub"></div></div>';
-  document.body.appendChild(root);
+    var root = document.createElement('div');
+    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:50;' +
+      'font-family:' + FONT + ';color:#fff;overflow:hidden;';
+    document.body.appendChild(root);
 
-  var mapCtx = root.querySelector('#vc-map').getContext('2d');
-  var starsEl = root.querySelector('#vc-stars');
-  var healthEl = root.querySelector('#vc-health');
-  var cashEl = root.querySelector('#vc-cash');
-  var popEl = root.querySelector('#vc-cashpop');
-  var ammoEl = root.querySelector('#vc-ammo');
-  var speedEl = root.querySelector('#vc-speed');
-  var bannerEl = root.querySelector('#vc-banner');
-  var overlayEl = root.querySelector('#vc-overlay');
-
-  var popUntil = 0;
-  var bannerUntil = 0;
-  var domTimer = 0; // refresh on the very first update
-
-  state.on('cash', function (d) {
-    if (!d || !d.amount) return;
-    popEl.textContent = (d.amount > 0 ? '+$' : '-$') + Math.abs(d.amount).toLocaleString('en-US');
-    popEl.style.opacity = '1';
-    popUntil = performance.now() + 1400;
-  });
-
-  function fmtCash(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
-
-  function refreshDOM(now) {
-    var w = Math.max(0, Math.min(5, Math.ceil(state.wanted || 0)));
-    var html = '';
-    for (var i = 0; i < 5; i++) html += '<span class="' + (i < w ? 'on' : 'off') + '">★</span>';
-    starsEl.innerHTML = html;
-
-    var frac = state.maxHealth > 0 ? state.health / state.maxHealth : 0;
-    healthEl.style.width = (frac * 100).toFixed(1) + '%';
-    healthEl.style.background = 'hsl(' + Math.round(frac * 120) + ',80%,45%)';
-
-    cashEl.textContent = fmtCash(state.cash);
-    if (now > popUntil) popEl.style.opacity = '0';
-
-    // ammo = rounds ready / reserve (state.ammo is the ready count)
-    ammoEl.innerHTML = state.ammo + ' <span class="res">/ ' + state.reserveAmmo + '</span>';
-
-    var g = VC.game;
-    if (g && g.driving && g.vehicles && g.vehicles.playerCar) {
-      speedEl.textContent = Math.round(Math.abs(g.vehicles.playerCar.speed) * 2.2) + ' MPH';
-    } else {
-      speedEl.textContent = '';
+    function box(css) {
+      var el = document.createElement('div');
+      el.style.cssText = css;
+      root.appendChild(el);
+      return el;
     }
 
-    if (now > bannerUntil) bannerEl.style.opacity = '0';
-  }
+    /* top-left: cash + health */
+    var cashEl = box('position:absolute;top:14px;left:16px;font-size:26px;' +
+      'color:#7be495;text-shadow:2px 2px 0 rgba(0,0,0,.55);letter-spacing:1px;');
+    var healthOuter = box('position:absolute;top:52px;left:16px;width:180px;height:14px;' +
+      'background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.65);border-radius:3px;');
+    var healthInner = document.createElement('div');
+    healthInner.style.cssText = 'height:100%;width:100%;background:#3ae03a;border-radius:2px;';
+    healthOuter.appendChild(healthInner);
 
-  function drawMap(now) {
-    var g = VC.game;
-    if (!g || !g.city) return;
-    var b = g.city.bounds;
-    var roads = g.city.roads;
-    var W = 176, H = 176;
-    function mx(x) { return (x - b.minX) / (b.maxX - b.minX) * W; }
-    function mz(z) { return (z - b.minZ) / (b.maxZ - b.minZ) * H; }
-
-    mapCtx.fillStyle = '#121a2e';
-    mapCtx.fillRect(0, 0, W, H);
-
-    // beach sand strip along the south edge of the bounds
-    var sandTop = mz(b.maxZ - 102);
-    mapCtx.fillStyle = '#c2a878';
-    mapCtx.fillRect(0, sandTop, W, H - sandTop);
-
-    // road grid
-    mapCtx.strokeStyle = '#46536e';
-    mapCtx.lineWidth = Math.max(2, roads.roadW / (b.maxX - b.minX) * W);
-    mapCtx.beginPath();
-    for (var i = 0; i < roads.n; i++) {
-      var c = -234 + roads.block * i;
-      mapCtx.moveTo(mx(c), 0); mapCtx.lineTo(mx(c), H);
-      mapCtx.moveTo(0, mz(c)); mapCtx.lineTo(W, mz(c));
+    /* top-right: wanted stars */
+    var starsEl = box('position:absolute;top:12px;right:16px;font-size:30px;' +
+      'text-shadow:2px 2px 0 rgba(0,0,0,.55);letter-spacing:3px;');
+    var starSpans = [];
+    for (var s = 0; s < 5; s++) {
+      var sp = document.createElement('span');
+      sp.textContent = '★';
+      sp.style.color = 'rgba(255,255,255,.28)';
+      starsEl.appendChild(sp);
+      starSpans.push(sp);
     }
-    mapCtx.stroke();
 
-    // traffic cars
-    if (g.vehicles && g.vehicles.cars) {
-      mapCtx.fillStyle = '#9aa5b8';
-      for (var ci = 0; ci < g.vehicles.cars.length; ci++) {
-        var cp = g.vehicles.cars[ci].group.position;
-        mapCtx.fillRect(mx(cp.x) - 1.5, mz(cp.z) - 1.5, 3, 3);
+    /* bottom-right: ammo + speed */
+    var ammoEl = box('position:absolute;right:16px;bottom:16px;font-size:24px;text-align:right;' +
+      'text-shadow:2px 2px 0 rgba(0,0,0,.55);');
+    var speedEl = box('position:absolute;right:16px;bottom:52px;font-size:18px;text-align:right;' +
+      'color:#ffd76a;text-shadow:2px 2px 0 rgba(0,0,0,.55);');
+
+    /* bottom-left: minimap */
+    var mapCanvas = document.createElement('canvas');
+    mapCanvas.width = MAP; mapCanvas.height = MAP;
+    mapCanvas.style.cssText = 'position:absolute;left:16px;bottom:16px;width:176px;height:176px;' +
+      'border:2px solid rgba(255,255,255,.65);border-radius:4px;background:#20242c;';
+    root.appendChild(mapCanvas);
+    var mctx = mapCanvas.getContext('2d');
+
+    /* centre banner */
+    var bannerEl = box('position:absolute;left:50%;top:16%;transform:translateX(-50%);' +
+      'text-align:center;opacity:0;transition:opacity .25s ease;max-width:80%;');
+    var bannerTitle = document.createElement('div');
+    bannerTitle.style.cssText = 'font-size:34px;color:#ffd76a;text-shadow:3px 3px 0 rgba(0,0,0,.6);letter-spacing:1px;';
+    var bannerSub = document.createElement('div');
+    bannerSub.style.cssText = 'font-size:17px;color:#fff;text-shadow:2px 2px 0 rgba(0,0,0,.6);margin-top:4px;';
+    bannerEl.appendChild(bannerTitle);
+    bannerEl.appendChild(bannerSub);
+
+    /* centre overlay (BUSTED / WASTED) */
+    var overlayEl = box('position:absolute;left:50%;top:38%;transform:translateX(-50%);' +
+      'font-size:64px;letter-spacing:6px;display:none;text-shadow:4px 4px 0 rgba(0,0,0,.65);');
+
+    /* ---------------- banner queue ---------------- */
+    var queue = [];
+    var current = null; // {title, sub, ms, phase, t}
+    function banner(title, sub, ms) {
+      queue.push({ title: title, sub: sub || '', ms: ms || 2600 });
+    }
+    function stepBanner(dt) {
+      if (!current) {
+        if (queue.length === 0) { bannerEl.style.opacity = '0'; return; }
+        current = queue.shift();
+        current.phase = 'in'; current.t = 0;
+        bannerTitle.textContent = current.title;
+        bannerSub.textContent = current.sub;
+      }
+      current.t += dt;
+      if (current.phase === 'in') {
+        bannerEl.style.opacity = '1';
+        if (current.t > 0.25) { current.phase = 'hold'; current.t = 0; }
+      } else if (current.phase === 'hold') {
+        if (current.t * 1000 > current.ms) { current.phase = 'out'; current.t = 0; }
+      } else if (current.phase === 'out') {
+        bannerEl.style.opacity = '0';
+        if (current.t > 0.3) current = null;
       }
     }
 
-    // pedestrians
-    if (g.npcs && g.npcs.peds) {
-      mapCtx.fillStyle = 'rgba(255,255,255,0.4)';
-      for (var pi = 0; pi < g.npcs.peds.length; pi++) {
-        var pp = g.npcs.peds[pi].fig.group.position;
-        mapCtx.fillRect(mx(pp.x) - 1, mz(pp.z) - 1, 2, 2);
+    /* ---------------- overlay ---------------- */
+    var overlayT = 0;
+    function showOverlay(kind) {
+      if (kind === 'busted') { overlayEl.textContent = 'BUSTED'; overlayEl.style.color = '#5aa2ff'; }
+      else { overlayEl.textContent = 'WASTED'; overlayEl.style.color = '#ff5147'; }
+      overlayEl.style.display = 'block';
+      overlayT = 2.5;
+    }
+    function hideOverlay() {
+      overlayEl.style.display = 'none';
+      overlayT = 0;
+    }
+
+    /* ---------------- minimap ---------------- */
+    function mapX(x) { return (x - WORLD.minX) / (WORLD.maxX - WORLD.minX) * MAP; }
+    function mapY(z) { return (z - WORLD.minZ) / (WORLD.maxZ - WORLD.minZ) * MAP; }
+
+    function drawMinimap() {
+      var G = window.VC.game || null;
+      mctx.fillStyle = '#c2a878'; // sand / city base
+      mctx.fillRect(0, 0, MAP, MAP);
+      // water strip at the south edge (beach side, high z)
+      mctx.fillStyle = '#3f7fbf';
+      mctx.fillRect(0, mapY(262), MAP, MAP - mapY(262));
+
+      // road bands
+      mctx.fillStyle = '#4a4f58';
+      var roadPxX = 12 / (WORLD.maxX - WORLD.minX) * MAP;
+      var roadPxY = 12 / (WORLD.maxZ - WORLD.minZ) * MAP;
+      for (var i = 0; i < 9; i++) {
+        var c = -234 + 52 * i;
+        mctx.fillRect(mapX(c) - roadPxX / 2, 0, roadPxX, MAP);
+        mctx.fillRect(0, mapY(c) - roadPxY / 2, MAP, roadPxY);
+      }
+
+      // mission marker (gold)
+      if (G && G.mission && G.mission.marker) {
+        mctx.fillStyle = '#ffd700';
+        mctx.beginPath();
+        mctx.arc(mapX(G.mission.marker.x), mapY(G.mission.marker.z), 4.5, 0, Math.PI * 2);
+        mctx.fill();
+        mctx.strokeStyle = 'rgba(0,0,0,.6)';
+        mctx.stroke();
+      }
+
+      // police blips (red)
+      if (G && G.police && G.police.units) {
+        mctx.fillStyle = '#ff3b30';
+        for (var u = 0; u < G.police.units.length; u++) {
+          var unit = G.police.units[u];
+          if (!unit || !unit.group) continue;
+          mctx.beginPath();
+          mctx.arc(mapX(unit.group.position.x), mapY(unit.group.position.z), 3, 0, Math.PI * 2);
+          mctx.fill();
+        }
+      }
+
+      // player arrow (white)
+      var pp = null, heading = 0;
+      if (G && G.vehicles && G.vehicles.playerCar) {
+        pp = G.vehicles.playerCar.group.position;
+        heading = G.vehicles.playerCar.heading;
+      } else if (G && G.player && G.player.group) {
+        pp = G.player.group.position;
+        heading = G.player.group.rotation.y;
+      }
+      if (pp) {
+        mctx.save();
+        mctx.translate(mapX(pp.x), mapY(pp.z));
+        mctx.rotate(Math.PI - heading);
+        mctx.fillStyle = '#ffffff';
+        mctx.strokeStyle = 'rgba(0,0,0,.7)';
+        mctx.beginPath();
+        mctx.moveTo(0, -6);
+        mctx.lineTo(4.4, 5);
+        mctx.lineTo(0, 2.6);
+        mctx.lineTo(-4.4, 5);
+        mctx.closePath();
+        mctx.fill();
+        mctx.stroke();
+        mctx.restore();
       }
     }
 
-    // police blips (later chunk): flash red/blue
-    if (g.police && g.police.units) {
-      var flash = Math.floor(now / 300) % 2 === 0;
-      mapCtx.fillStyle = flash ? '#ff3b30' : '#3b82f6';
-      for (var ui = 0; ui < g.police.units.length; ui++) {
-        var u = g.police.units[ui];
-        var up = (u.group || u).position;
-        if (!up) continue;
-        mapCtx.beginPath();
-        mapCtx.arc(mx(up.x), mz(up.z), 3, 0, 6.2832);
-        mapCtx.fill();
+    /* ---------------- refresh ---------------- */
+    function refresh(dt) {
+      cashEl.textContent = '$' + state.cash;
+      var h = Math.max(0, Math.min(100, state.health));
+      healthInner.style.width = h + '%';
+      healthInner.style.background = 'hsl(' + Math.round(h * 1.2) + ',80%,45%)';
+
+      var filled = Math.max(0, Math.min(5, Math.ceil(state.wanted)));
+      for (var i = 0; i < 5; i++) {
+        starSpans[i].style.color = i < filled ? '#ffd700' : 'rgba(255,255,255,.28)';
+      }
+
+      ammoEl.textContent = state.ammo + ' / ' + state.reserveAmmo;
+
+      var G = window.VC.game || null;
+      if (G && G.driving && G.vehicles && G.vehicles.playerCar) {
+        speedEl.textContent = Math.round(Math.abs(G.vehicles.playerCar.speed) * 3.6) + ' KM/H';
+        speedEl.style.display = 'block';
+      } else {
+        speedEl.style.display = 'none';
+      }
+
+      drawMinimap();
+      stepBanner(dt || 0);
+      if (overlayT > 0) {
+        overlayT -= dt || 0;
+        if (overlayT <= 0) overlayEl.style.display = 'none';
       }
     }
 
-    // mission marker (later chunk)
-    if (g.mission && g.mission.marker) {
-      mapCtx.fillStyle = '#ffd93c';
-      mapCtx.beginPath();
-      mapCtx.arc(mx(g.mission.marker.x), mz(g.mission.marker.z), 3.5, 0, 6.2832);
-      mapCtx.fill();
-    }
+    function update(dt) { refresh(dt); }
 
-    // player arrow
-    var pos = null, heading = 0;
-    if (g.driving && g.vehicles && g.vehicles.playerCar) {
-      pos = g.vehicles.playerCar.group.position;
-      heading = g.vehicles.playerCar.heading || 0;
-    } else if (g.player) {
-      pos = g.player.position;
-      heading = g.player.group ? g.player.group.rotation.y : 0;
-    }
-    if (pos) {
-      var px = mx(pos.x), py = mz(pos.z);
-      mapCtx.save();
-      mapCtx.translate(px, py);
-      mapCtx.rotate(Math.PI - heading);
-      mapCtx.fillStyle = '#ffffff';
-      mapCtx.beginPath();
-      mapCtx.moveTo(0, -6); mapCtx.lineTo(4, 5); mapCtx.lineTo(0, 2.5); mapCtx.lineTo(-4, 5);
-      mapCtx.closePath(); mapCtx.fill();
-      mapCtx.restore();
-    }
+    refresh(0); // synchronous initial paint
+
+    return {
+      update: update,
+      banner: banner,
+      showOverlay: showOverlay,
+      hideOverlay: hideOverlay
+    };
   }
 
-  function banner(title, sub, ms) {
-    bannerEl.querySelector('.t').textContent = title || '';
-    bannerEl.querySelector('.s').textContent = sub || '';
-    bannerEl.style.opacity = '1';
-    bannerUntil = performance.now() + (ms || 3500);
-  }
-
-  function showOverlay(kind) {
-    if (!kind) { overlayEl.style.display = 'none'; return; }
-    var big = overlayEl.querySelector('.big');
-    var sub = overlayEl.querySelector('.sub');
-    if (kind === 'busted') {
-      big.textContent = 'BUSTED';
-      big.style.color = '#3b82f6';
-      sub.textContent = 'The VCPD got you. Bail posted — stay out of trouble.';
-    } else {
-      big.textContent = 'WASTED';
-      big.style.color = '#ff3b30';
-      sub.textContent = 'You flatlined in Vice City. The hospital sends its bill.';
-    }
-    overlayEl.style.display = 'flex';
-  }
-
-  function update(dt) {
-    var now = performance.now();
-    domTimer -= dt;
-    if (domTimer <= 0) { domTimer = 0.1; refreshDOM(now); }
-    drawMap(now);
-  }
-
-  // Paint the initial state synchronously so the HUD is correct from
-  // frame one (menus, screenshots) instead of after the first interval.
-  refreshDOM(performance.now());
-
-  return { update: update, banner: banner, showOverlay: showOverlay };
-};
+  window.VC.createHUD = createHUD;
+})();

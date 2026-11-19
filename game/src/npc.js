@@ -1,244 +1,210 @@
-// VICE CITY: Rise of Crime — pedestrians.
-// ~26 low-poly walkers on the sidewalks: they stroll, turn or cross at
-// intersections, panic and flee from danger, and go down when the player's
-// car hits them (which reports a hit-and-run crime to the shared state).
-window.VC = window.VC || {};
+'use strict';
+/* VICE CITY: Rise of Crime — pedestrians (chunk C1).
+   VC.createNPCs(scene, city, rng): 26 low-poly walkers strolling the
+   sidewalk lines (block edges). They panic and flee from trouble, can be
+   put down (mode 'down', timer counts to a far-away respawn), and a fast
+   player car that overlaps one causes a hit-and-run crime. */
+(function () {
+  window.VC = window.VC || {};
 
-VC.createNPCs = function (scene, city, rng, state) {
-  var ROAD_W = city.roads.roadW;         // 12
-  var PITCH = city.roads.block;          // 52
-  var N = city.roads.n;                  // 9 road lines per axis
-  var SIDE = ROAD_W / 2 + 1.5;           // sidewalk offset from road centre
-  var FIRST = -234;                      // first road line (avenues & streets)
-  var BOUND = 250;                       // keep walkers inside the city
+  var CENTRELINES = [];
+  for (var ci = 0; ci < 9; ci++) CENTRELINES.push(-234 + 52 * ci);
+  var SIDE = 8.5; // sidewalk offset from a road centreline
 
-  var SHIRTS = [0xff6b6b, 0x4ecdc4, 0xffe66d, 0xff9ff3, 0x54a0ff, 0xff9f43,
-                0x1dd1a1, 0x48dbfb, 0xf368e0, 0xee5253, 0x0abde3, 0xfed330];
-  var PANTS = [0x2f3542, 0x57606f, 0x747d8c, 0x3b3b98, 0x82589f, 0x222f3e];
-  var SKIN = [0xf1c27d, 0xe0ac69, 0x8d5524, 0xffdbac, 0xc68642];
+  var SHIRTS = [0xd94f4f, 0x4f7fd9, 0x53b06a, 0xe8c93c, 0xe6e3da, 0x9b59b6,
+                0xe67e22, 0x4fb3b0, 0xec7fa5, 0x95a5a6, 0x2e6e5e, 0xc0c6cc];
+  var PANTS = [0x2c3e50, 0x57432a, 0x3a3f47, 0x6e2f35, 0x274435, 0x715f8f];
+  var SKIN = [0xf2c79b, 0xc98d5e, 0x8a5a33, 0x6e4426, 0xffdbac];
 
-  var matCache = {};
-  function mat(color) {
-    if (!matCache[color]) matCache[color] = new THREE.MeshLambertMaterial({ color: color });
-    return matCache[color];
-  }
-  function box(w, h, d, color, x, y, z) {
-    var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(color));
-    m.position.set(x, y, z);
-    return m;
-  }
+  function createNPCs(scene, city, rng) {
+    var peds = [];
 
-  // One walker figure ~1.75 units tall, pivoted at the feet.
-  function buildFigure() {
-    var g = new THREE.Group();
-    var shirt = SHIRTS[rng.int(0, SHIRTS.length - 1)];
-    var pants = PANTS[rng.int(0, PANTS.length - 1)];
-    var skin = SKIN[rng.int(0, SKIN.length - 1)];
+    function makeFigure() {
+      var g = new THREE.Group();
+      var shirt = new THREE.MeshLambertMaterial({ color: SHIRTS[Math.floor(rng() * SHIRTS.length)] });
+      var pants = new THREE.MeshLambertMaterial({ color: PANTS[Math.floor(rng() * PANTS.length)] });
+      var skin = new THREE.MeshLambertMaterial({ color: SKIN[Math.floor(rng() * SKIN.length)] });
 
-    var legL = box(0.16, 0.8, 0.18, pants, -0.11, 0.4, 0);
-    var legR = box(0.16, 0.8, 0.18, pants, 0.11, 0.4, 0);
-    legL.geometry.translate(0, -0.4, 0); legL.position.y = 0.8;
-    legR.geometry.translate(0, -0.4, 0); legR.position.y = 0.8;
-    var torso = box(0.46, 0.62, 0.24, shirt, 0, 1.11, 0);
-    var armL = box(0.11, 0.58, 0.13, shirt, -0.3, 1.36, 0);
-    var armR = box(0.11, 0.58, 0.13, shirt, 0.3, 1.36, 0);
-    armL.geometry.translate(0, -0.24, 0);
-    armR.geometry.translate(0, -0.24, 0);
-    var head = box(0.26, 0.28, 0.26, skin, 0, 1.58, 0);
-    g.add(legL); g.add(legR); g.add(torso); g.add(armL); g.add(armR); g.add(head);
-    return { group: g, legL: legL, legR: legR, armL: armL, armR: armR };
-  }
+      var legGeo = new THREE.BoxGeometry(0.16, 0.5, 0.18);
+      var legL = new THREE.Mesh(legGeo, pants); legL.position.set(-0.11, 0.25, 0); g.add(legL);
+      var legR = new THREE.Mesh(legGeo, pants); legR.position.set(0.11, 0.25, 0); g.add(legR);
 
-  function roadLine(i) { return FIRST + PITCH * i; }
+      var torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.26), shirt);
+      torso.position.y = 0.81;
+      torso.castShadow = true;
+      g.add(torso);
 
-  // Place a ped on a random sidewalk: axis 'z' = strolling along z on an
-  // avenue sidewalk (fixed x), axis 'x' = along x on a street sidewalk.
-  function placeOnSidewalk(p, nearX, nearZ) {
-    var li = rng.int(0, N - 1);
-    var off = (rng.next() < 0.5 ? -SIDE : SIDE);
-    if (rng.next() < 0.5) {
-      p.axis = 'z'; p.fixed = roadLine(li) + off;
-      p.t = nearZ !== undefined ? nearZ + rng.range(-26, 26) : rng.range(-BOUND, BOUND);
-    } else {
-      p.axis = 'x'; p.fixed = roadLine(li) + off;
-      p.t = nearX !== undefined ? nearX + rng.range(-26, 26) : rng.range(-BOUND, BOUND);
+      var armGeo = new THREE.BoxGeometry(0.13, 0.55, 0.15);
+      var armL = new THREE.Mesh(armGeo, shirt); armL.position.set(-0.34, 0.82, 0); g.add(armL);
+      var armR = new THREE.Mesh(armGeo, shirt); armR.position.set(0.34, 0.82, 0); g.add(armR);
+
+      var head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.32, 0.3), skin);
+      head.position.y = 1.28;
+      g.add(head);
+
+      scene.add(g);
+      return { group: g, armL: armL, armR: armR };
     }
-    p.dir = rng.next() < 0.5 ? 1 : -1;
-    p.mode = 'walk';
-    p.timer = 0;
-    syncTransform(p, 0);
-  }
 
-  function syncTransform(p, swing) {
-    var g = p.fig.group;
-    if (p.axis === 'z') g.position.set(p.fixed, 0, p.t);
-    else g.position.set(p.t, 0, p.fixed);
-    var hx = p.axis === 'x' ? p.dir : 0;
-    var hz = p.axis === 'z' ? p.dir : 0;
-    if (p.mode === 'flee') { hx = p.fleeX; hz = p.fleeZ; g.position.x = p.fx; g.position.z = p.fz; }
-    g.rotation.y = Math.atan2(hx, hz);
-    var s = swing || 0;
-    p.fig.legL.rotation.x = s;
-    p.fig.legR.rotation.x = -s;
-    p.fig.armL.rotation.x = -s * 0.8;
-    p.fig.armR.rotation.x = s * 0.8;
-    g.position.y = Math.abs(Math.sin(p.phase)) * 0.045;
-  }
-
-  var peds = [];
-  for (var i = 0; i < 26; i++) {
-    var fig = buildFigure();
-    scene.add(fig.group);
-    var ped = {
-      fig: fig, axis: 'z', fixed: 0, t: 0, dir: 1,
-      speed: rng.range(1.1, 1.9), phase: rng.range(0, 6.28),
-      mode: 'walk', timer: 0, fleeX: 0, fleeZ: 0, fx: 0, fz: 0,
-      lastCross: -999
-    };
-    placeOnSidewalk(ped);
-    peds.push(ped);
-  }
-
-  // Did the ped cross a road line (intersection) this step?
-  function crossedLine(prev, now) {
-    var a = Math.round((prev - FIRST) / PITCH);
-    var b = Math.round((now - FIRST) / PITCH);
-    if (a === b) return -1;
-    var line = roadLine(now > prev ? b : a);
-    // only count when actually passing the line position
-    if ((prev - line) * (now - line) <= 0 && prev !== now) return line;
-    return -1;
-  }
-
-  function atIntersection(p, line) {
-    var roll = rng.next();
-    if (roll < 0.30) {
-      // turn onto the crossing road: walk along it on a corner sidewalk
-      var alongHere = p.fixed; // coordinate we keep as our position on the new axis
-      p.axis = p.axis === 'z' ? 'x' : 'z';
-      p.fixed = line + (p.dir >= 0 ? SIDE : -SIDE);
-      p.t = alongHere;
-      if (rng.next() < 0.5) p.dir = -p.dir;
-    } else if (roll < 0.45) {
-      // cross the road to the opposite sidewalk of the same road
-      var lineC = nearestLine(p.fixed);
-      var s = Math.sign(p.fixed - lineC) || 1;
-      p.fixed = lineC - s * SIDE;
+    /* Sidewalk lines: for each road centreline, a line on each side. */
+    function randomLine() {
+      var c = CENTRELINES[Math.floor(rng() * CENTRELINES.length)];
+      return c + (rng() < 0.5 ? -SIDE : SIDE);
     }
-    // else: continue straight
-  }
 
-  function nearestLine(v) {
-    var i = Math.round((v - FIRST) / PITCH);
-    i = Math.max(0, Math.min(N - 1, i));
-    return roadLine(i);
-  }
-
-  // Snap a ped (e.g. after fleeing) back onto the nearest sidewalk.
-  function snapToSidewalk(p) {
-    var gx = p.fig.group.position.x, gz = p.fig.group.position.z;
-    var lx = nearestLine(gx), lz = nearestLine(gz);
-    if (Math.abs(gx - lx) < Math.abs(gz - lz)) {
-      p.axis = 'z';
-      p.fixed = lx + (gx >= lx ? SIDE : -SIDE);
-      p.t = Math.max(-BOUND, Math.min(BOUND, gz));
-    } else {
-      p.axis = 'x';
-      p.fixed = lz + (gz >= lz ? SIDE : -SIDE);
-      p.t = Math.max(-BOUND, Math.min(BOUND, gx));
-    }
-    p.mode = 'walk';
-    syncTransform(p, 0);
-  }
-
-  function panicAt(x, z, radius) {
-    var r2 = radius * radius;
-    for (var i = 0; i < peds.length; i++) {
-      var p = peds[i];
-      if (p.mode === 'down') continue;
-      var gp = p.fig.group.position;
-      var dx = gp.x - x, dz = gp.z - z;
-      var d2 = dx * dx + dz * dz;
-      if (d2 > r2) continue;
-      var d = Math.sqrt(d2) || 1;
-      p.mode = 'flee';
-      p.timer = rng.range(3, 5);
-      p.fleeX = dx / d; p.fleeZ = dz / d;
-      p.fx = gp.x; p.fz = gp.z;
-    }
-  }
-
-  function update(dt) {
-    var veh = VC.game && VC.game.vehicles;
-    var car = veh && veh.playerCar;
-    var carPos = car ? car.group.position : null;
-    var carSpeed = car ? Math.abs(car.speed) : 0;
-
-    for (var i = 0; i < peds.length; i++) {
-      var p = peds[i];
-      var g = p.fig.group;
-
-      if (p.mode === 'down') {
-        p.timer -= dt;
-        if (p.timer <= 0) {
-          g.rotation.x = 0;
-          // respawn far from the player
-          var px = VC.game && VC.game.player ? VC.game.player.position.x : 0;
-          var pz = VC.game && VC.game.player ? VC.game.player.position.z : 0;
-          do { placeOnSidewalk(p); } while (Math.abs(g.position.x - px) < 60 && Math.abs(g.position.z - pz) < 60);
-        }
-        continue;
+    function pickTarget(ped) {
+      // Walk to a random corner-ish point along the current line, or turn.
+      var along = ped.axis === 'v' ? ped.z : ped.x;
+      var roll = rng();
+      if (roll < 0.35) {
+        // Turn onto a crossing sidewalk line.
+        var cross = CENTRELINES[Math.floor(rng() * CENTRELINES.length)] + (rng() < 0.5 ? -SIDE : SIDE);
+        if (ped.axis === 'v') { ped.targetX = ped.x; ped.targetZ = cross; ped.turnTo = 'h'; }
+        else { ped.targetX = cross; ped.targetZ = ped.z; ped.turnTo = 'v'; }
+      } else {
+        var dest = Math.max(-248, Math.min(248, along + (rng() * 160 - 80)));
+        if (ped.axis === 'v') { ped.targetX = ped.x; ped.targetZ = dest; }
+        else { ped.targetX = dest; ped.targetZ = ped.z; }
+        ped.turnTo = null;
       }
+    }
 
-      // player-car interactions: panic near fast car, hit = down + crime
-      if (carPos) {
-        var dx = g.position.x - carPos.x, dz = g.position.z - carPos.z;
-        var d2 = dx * dx + dz * dz;
-        if (carSpeed > 4 && d2 < 1.6 * 1.6) {
-          p.mode = 'down';
-          p.timer = 6;
-          g.rotation.x = -Math.PI / 2;
-          g.position.y = 0.25;
-          if (state) state.commitCrime(2, 'hitrun');
+    function placeOnSidewalk(ped, farFrom) {
+      ped.axis = rng() < 0.5 ? 'v' : 'h';
+      var tries = 0;
+      do {
+        if (ped.axis === 'v') { ped.x = randomLine(); ped.z = -248 + rng() * 496; }
+        else { ped.z = randomLine(); ped.x = -248 + rng() * 496; }
+        tries++;
+      } while (farFrom && tries < 12 &&
+               Math.abs(ped.x - farFrom.x) < 80 && Math.abs(ped.z - farFrom.z) < 80);
+      ped.group.position.set(ped.x, 0, ped.z);
+      pickTarget(ped);
+    }
+
+    for (var i = 0; i < 26; i++) {
+      var fig = makeFigure();
+      var ped = {
+        group: fig.group, armL: fig.armL, armR: fig.armR,
+        mode: 'walk', timer: 0,
+        speed: 1.6 + rng() * 0.8,
+        x: 0, z: 0, targetX: 0, targetZ: 0, turnTo: null,
+        axis: 'v', fleeX: 0, fleeZ: 0, phase: rng() * Math.PI * 2
+      };
+      placeOnSidewalk(ped, null);
+      peds.push(ped);
+    }
+
+    function panicAt(x, z, radius) {
+      for (var i = 0; i < peds.length; i++) {
+        var ped = peds[i];
+        if (ped.mode !== 'walk') continue;
+        var dx = ped.x - x, dz = ped.z - z;
+        var d = Math.sqrt(dx * dx + dz * dz);
+        if (d <= radius) {
+          ped.mode = 'panic';
+          ped.timer = 3 + rng() * 2;
+          if (d < 0.01) { dx = rng() - 0.5; dz = rng() - 0.5; d = 1; }
+          ped.fleeX = dx / d; ped.fleeZ = dz / d;
+          ped.armL.rotation.x = Math.PI;
+          ped.armR.rotation.x = Math.PI;
+        }
+      }
+    }
+
+    function putDown(ped) {
+      ped.mode = 'down';
+      ped.timer = 6;
+      ped.group.rotation.x = -Math.PI / 2;
+      ped.group.position.y = 0.25;
+      ped.armL.rotation.x = 0;
+      ped.armR.rotation.x = 0;
+    }
+
+    function playerPosition() {
+      var G = window.VC.game;
+      if (G && G.player) {
+        if (G.player.position) return G.player.position;
+        if (G.player.group) return G.player.group.position;
+      }
+      return null;
+    }
+
+    function update(dt) {
+      var G = window.VC.game || null;
+      var driving = !!(G && G.driving && G.vehicles && G.vehicles.playerCar);
+      var car = driving ? G.vehicles.playerCar : null;
+      var carPos = car ? car.group.position : null;
+      var carSpeed = car ? Math.abs(car.speed) : 0;
+
+      for (var i = 0; i < peds.length; i++) {
+        var ped = peds[i];
+
+        if (ped.mode === 'down') {
+          ped.timer -= dt;
+          if (ped.timer <= 0) {
+            ped.group.rotation.x = 0;
+            ped.group.position.y = 0;
+            ped.mode = 'walk';
+            placeOnSidewalk(ped, playerPosition());
+          }
           continue;
         }
-        if (carSpeed > 10 && d2 < 25 && p.mode === 'walk') {
-          panicAt(carPos.x, carPos.z, 8);
+
+        if (ped.mode === 'panic') {
+          ped.timer -= dt;
+          var ps = 5 + (ped.speed - 1.6);
+          ped.x += ped.fleeX * ps * dt;
+          ped.z += ped.fleeZ * ps * dt;
+          var B = city.bounds;
+          ped.x = Math.max(B.minX + 2, Math.min(B.maxX - 2, ped.x));
+          ped.z = Math.max(B.minZ + 2, Math.min(B.maxZ - 2, ped.z));
+          ped.group.position.set(ped.x, Math.abs(Math.sin(ped.phase += dt * 10)) * 0.06, ped.z);
+          ped.group.rotation.y = Math.atan2(ped.fleeX, ped.fleeZ);
+          if (ped.timer <= 0) {
+            ped.mode = 'walk';
+            ped.armL.rotation.x = 0;
+            ped.armR.rotation.x = 0;
+            // Resume strolling: snap onto the nearest sidewalk line.
+            if (Math.abs(ped.x) < Math.abs(ped.z)) { /* keep it simple: retarget from here */ }
+            ped.targetX = ped.x; ped.targetZ = ped.z;
+            pickTarget(ped);
+          }
+        } else {
+          // walk toward target
+          var dx = ped.targetX - ped.x;
+          var dz = ped.targetZ - ped.z;
+          var dist = Math.sqrt(dx * dx + dz * dz);
+          if (dist < 0.4) {
+            if (ped.turnTo) { ped.axis = ped.turnTo; ped.turnTo = null; }
+            pickTarget(ped);
+          } else {
+            var vx = dx / dist, vz = dz / dist;
+            ped.x += vx * ped.speed * dt;
+            ped.z += vz * ped.speed * dt;
+            ped.group.position.set(ped.x, Math.abs(Math.sin(ped.phase += dt * 6)) * 0.04, ped.z);
+            ped.group.rotation.y = Math.atan2(vx, vz);
+          }
+        }
+
+        // Hit-and-run: a fast player car overlapping this ped puts it down.
+        if (carPos && carSpeed > 8 && ped.mode !== 'down') {
+          var hx = ped.x - carPos.x, hz = ped.z - carPos.z;
+          if (hx * hx + hz * hz < 1.7 * 1.7) {
+            putDown(ped);
+            if (G && G.state && G.state.commitCrime) G.state.commitCrime(2, 'hitrun');
+            panicAt(carPos.x, carPos.z, 11);
+          }
         }
       }
-
-      if (p.mode === 'flee') {
-        p.timer -= dt;
-        var fs = 5.4;
-        p.fx += p.fleeX * fs * dt;
-        p.fz += p.fleeZ * fs * dt;
-        p.phase += dt * fs * 2.4;
-        if (p.timer <= 0) snapToSidewalk(p);
-        else syncTransform(p, Math.sin(p.phase) * 0.65);
-        continue;
-      }
-
-      // calm sidewalk stroll
-      var prev = p.t;
-      p.t += p.dir * p.speed * dt;
-      p.phase += dt * p.speed * 2.3;
-      if (p.t > BOUND || p.t < -BOUND) { p.dir = -p.dir; p.t = Math.max(-BOUND, Math.min(BOUND, p.t)); }
-      var line = crossedLine(prev, p.t);
-      if (line !== -1) atIntersection(p, line);
-      syncTransform(p, Math.sin(p.phase) * 0.5);
     }
+
+    return {
+      update: update,
+      peds: peds,
+      panicAt: panicAt
+    };
   }
 
-  // Relocate the nearest `count` peds onto sidewalks around a point
-  // (used by screenshot modes to guarantee a busy street).
-  function scatterNear(x, z, count) {
-    var sorted = peds.slice().sort(function (a, b) {
-      var da = (a.fig.group.position.x - x) * (a.fig.group.position.x - x) + (a.fig.group.position.z - z) * (a.fig.group.position.z - z);
-      var db = (b.fig.group.position.x - x) * (b.fig.group.position.x - x) + (b.fig.group.position.z - z) * (b.fig.group.position.z - z);
-      return da - db;
-    });
-    for (var i = 0; i < Math.min(count, sorted.length); i++) placeOnSidewalk(sorted[i], x, z);
-  }
-
-  return { update: update, peds: peds, panicAt: panicAt, scatterNear: scatterNear };
-};
+  window.VC.createNPCs = createNPCs;
+})();

@@ -1,359 +1,274 @@
-// VICE CITY: Rise of Crime — VCPD: wanted levels, pursuit, bust & wasted.
-// state.commitCrime only emits 'crime' events, so this module owns the
-// wanted level: each crime adds half a star per crime level (cap 5), and
-// one cop unit is fielded per whole star. Lose the heat by staying unseen.
+// VICE CITY: Rise of Crime — police.js
+// VC.createPolice(scene, city, state, player)
+// Four patrol units with a wanted-level system. The police module owns
+// state.wanted: 'crime' events raise it, quiet time decays it. Units pursue
+// the player (on foot or in a car); on foot, sustained close contact busts.
 window.VC = window.VC || {};
 
-VC.createPolice = function (scene, city, rng, state, audio) {
-  var FIRST = -234, PITCH = 52;               // road lines, as in city/npc
-  var STATION = { x: -33.5, z: -18.5 };       // sidewalk corner, roads -26/-26
-  var HOSPITAL = { x: 33.5, z: 18.5 };        // sidewalk corner, roads 26/26
-  var MAX_UNITS = 5;
+VC.createPolice = function (scene, city, state, player) {
+  'use strict';
 
-  var units = [];
-  var timeAcc = 0;
-  var lastCrimeT = -100;
-  var decayT = 0;
-  var bustT = 0;
-  var seqT = 0;          // busted/wasted sequence time remaining
-  var carHitCd = 0, footHitCd = 0;
-  var prevTX = 0, prevTZ = 0, playerSpeed = 0, havePrev = false;
+  var MAX_SPEED = 26;
+  var BUST_RANGE = 7;
+  var BUST_TIME = 2.5;
+  var DECAY_DELAY = 12;
+  var DECAY_RATE = 0.05;
 
-  // Crimes become stars here (commitCrime itself does not raise wanted).
-  state.on('crime', function (e) {
-    var lvl = (e && e.level) || 1;
-    state.wanted = Math.min(5, state.wanted + lvl * 0.5);
-    lastCrimeT = timeAcc;
-  });
+  var sinceCrime = 0;
+  var bustTimer = 0;
+  var sirenOn = false;
+  var lightPhase = 0;
 
-  // ---------------- cop car factory --------------------------------------
-  function mat(color, basic) {
-    return basic ? new THREE.MeshBasicMaterial({ color: color })
-                 : new THREE.MeshLambertMaterial({ color: color });
-  }
-  function box(w, h, d, m, x, y, z) {
-    var ms = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
-    ms.position.set(x, y, z);
-    return ms;
-  }
-
+  // --- simple cop-car factory -------------------------------------------
   function buildCopCar() {
     var g = new THREE.Group();
-    var black = mat(0x14161c), white = mat(0xf2f4f6), glass = mat(0x10151f);
-    g.add(box(1.9, 0.55, 4.3, black, 0, 0.55, 0));          // body
-    g.add(box(1.94, 0.3, 1.1, white, 0, 0.62, 0.1));        // white door band
-    g.add(box(1.7, 0.5, 2.0, glass, 0, 1.05, -0.1));        // cabin glass
-    g.add(box(1.74, 0.09, 2.05, white, 0, 1.33, -0.1));     // white roof
-    g.add(box(1.7, 0.1, 0.5, black, 0, 1.42, -0.1));        // light-bar base
-    var redMat = mat(0xff2a2a, true), blueMat = mat(0x1a3a8f, true);
-    var red = box(0.55, 0.16, 0.4, redMat, -0.42, 1.55, -0.1);
-    var blue = box(0.55, 0.16, 0.4, blueMat, 0.42, 1.55, -0.1);
-    g.add(red); g.add(blue);
-    var hl = mat(0xfff6c9, true);
-    g.add(box(0.4, 0.14, 0.06, hl, -0.6, 0.62, 2.16));      // headlights (+Z fwd)
-    g.add(box(0.4, 0.14, 0.06, hl, 0.6, 0.62, 2.16));
-    var tl = mat(0xb02020, true);
-    g.add(box(0.4, 0.12, 0.06, tl, -0.6, 0.66, -2.16));
-    g.add(box(0.4, 0.12, 0.06, tl, 0.6, 0.66, -2.16));
-    var wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.24, 10);
-    var wheelMat = mat(0x0c0c0e);
-    var wx = [-0.85, 0.85], wz = [1.35, -1.35];
-    for (var i = 0; i < 4; i++) {
-      var w = new THREE.Mesh(wheelGeo, wheelMat);
-      w.rotation.z = Math.PI / 2;
-      w.position.set(wx[i % 2], 0.36, wz[Math.floor(i / 2)]);
-      g.add(w);
+    var black = new THREE.MeshLambertMaterial({ color: 0x14161c });
+    var white = new THREE.MeshLambertMaterial({ color: 0xf2f3f5 });
+    var glass = new THREE.MeshLambertMaterial({ color: 0x1b2a3a });
+
+    var body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.55, 4.4), black);
+    body.position.y = 0.55;
+    g.add(body);
+    var doors = new THREE.Mesh(new THREE.BoxGeometry(2.04, 0.5, 2.2), white);
+    doors.position.set(0, 0.62, 0.1);
+    g.add(doors);
+    var cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 2.0), glass);
+    cabin.position.set(0, 1.05, -0.1);
+    g.add(cabin);
+
+    var wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.3, 10);
+    var wheelMat = new THREE.MeshLambertMaterial({ color: 0x0a0a0a });
+    var wx = [-0.95, 0.95], wz = [-1.45, 1.45];
+    for (var i = 0; i < 2; i++) {
+      for (var j = 0; j < 2; j++) {
+        var w = new THREE.Mesh(wheelGeo, wheelMat);
+        w.rotation.z = Math.PI / 2;
+        w.position.set(wx[i], 0.36, wz[j]);
+        g.add(w);
+      }
     }
+
+    // Light bar: red left, blue right, both emissive; flashed in update().
+    var barBase = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 0.1, 0.4),
+      new THREE.MeshLambertMaterial({ color: 0x222222 })
+    );
+    barBase.position.set(0, 1.36, -0.1);
+    g.add(barBase);
+    var redMat = new THREE.MeshLambertMaterial({ color: 0x550000, emissive: 0xff2020 });
+    var blueMat = new THREE.MeshLambertMaterial({ color: 0x000055, emissive: 0x2040ff });
+    var red = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.16, 0.34), redMat);
+    red.position.set(-0.38, 1.48, -0.1);
+    g.add(red);
+    var blue = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.16, 0.34), blueMat);
+    blue.position.set(0.38, 1.48, -0.1);
+    g.add(blue);
+
     return { group: g, redMat: redMat, blueMat: blueMat };
   }
 
-  // ---------------- spawning ---------------------------------------------
-  function nearestLine(v) {
-    var i = Math.round((v - FIRST) / PITCH);
-    i = Math.max(0, Math.min(9, i));
-    return FIRST + PITCH * i;
-  }
-  function insideCollider(x, z, pad) {
-    for (var i = 0; i < city.colliders.length; i++) {
-      var b = city.colliders[i];
-      if (x > b.minX - pad && x < b.maxX + pad && z > b.minZ - pad && z < b.maxZ + pad) return true;
-    }
-    return false;
-  }
-  function makeUnit() {
+  // Depots: quiet corners where inactive units sit hidden.
+  var depots = [
+    { x: -234, z: -234 }, { x: 234, z: -234 },
+    { x: -234, z: 234 }, { x: 234, z: 234 }
+  ];
+
+  var units = [];
+  for (var u = 0; u < 4; u++) {
     var built = buildCopCar();
-    built.group.isCop = true;
+    built.group.position.set(depots[u].x, 0, depots[u].z);
+    built.group.visible = false;
     scene.add(built.group);
-    var u = { group: built.group, redMat: built.redMat, blueMat: built.blueMat,
-              heading: 0, speed: 0, leaving: false, leaveT: 0 };
-    u.group.userData.unit = u;
-    units.push(u);
-    return u;
+    units.push({
+      group: built.group,
+      redMat: built.redMat,
+      blueMat: built.blueMat,
+      speed: 0,
+      heading: 0,
+      active: false
+    });
   }
-  function removeUnit(u) {
-    scene.remove(u.group);
-    var i = units.indexOf(u);
-    if (i >= 0) units.splice(i, 1);
+
+  // Wanted rises with crime; this module owns the value.
+  if (state && typeof state.on === 'function') {
+    state.on('crime', function (ev) {
+      var level = ev && typeof ev.level === 'number' ? ev.level : 1;
+      state.wanted = Math.min(5, (state.wanted || 0) + 0.5 * level);
+      sinceCrime = 0;
+    });
   }
-  function spawnPosFor(tp) {
-    for (var tries = 0; tries < 8; tries++) {
-      var ang = rng.range(0, Math.PI * 2);
-      var dist = rng.range(60, 95);
-      var x = tp.x + Math.sin(ang) * dist;
-      var z = tp.z + Math.cos(ang) * dist;
-      x = Math.max(city.bounds.minX + 8, Math.min(city.bounds.maxX - 8, x));
-      z = Math.max(city.bounds.minZ + 8, Math.min(city.bounds.maxZ - 8, z));
-      if (Math.abs(x - nearestLine(x)) < Math.abs(z - nearestLine(z))) x = nearestLine(x);
-      else z = nearestLine(z);
-      if (!insideCollider(x, z, 2.2)) return { x: x, z: z };
-    }
-    return { x: nearestLine(tp.x) + 40, z: nearestLine(tp.z) };
+
+  function activeCount() {
+    var w = state.wanted || 0;
+    if (w < 1) return 0;
+    return Math.min(units.length, Math.ceil(w));
   }
+
   function targetPos() {
-    var g = window.VC.game;
-    if (!g) return { x: 0, z: 0 };
-    if (g.driving && g.vehicles && g.vehicles.playerCar) return g.vehicles.playerCar.group.position;
-    return g.player.position;
-  }
-
-  // ---------------- sequences --------------------------------------------
-  function endSequence() {
-    seqT = 0;
-    var g = window.VC.game;
-    if (g && g.hud) g.hud.showOverlay(null);
-    if (g) g.inputLocked = false;
-  }
-  function doBusted() {
-    var g = window.VC.game;
-    if (!g) return;
-    seqT = 3;
-    g.inputLocked = true;
-    if (g.hud) g.hud.showOverlay('busted');
-    audio.sting();
-    audio.sirenSet(false);
-    var fine = 100 + 50 * Math.ceil(state.wanted);
-    state.addCash(-Math.min(fine, state.cash));
-    state.wanted = 0;
-    bustT = 0;
-    g.player.teleport(STATION.x, STATION.z);
-  }
-  function doWasted() {
-    var g = window.VC.game;
-    if (!g) return;
-    seqT = 3;
-    g.inputLocked = true;
-    if (g.hud) g.hud.showOverlay('wasted');
-    audio.sting();
-    audio.sirenSet(false);
-    state.addCash(-Math.floor(state.cash * 0.10));
-    state.heal(state.maxHealth);
-    state.wanted = Math.max(0, state.wanted - 1);
-    if (g.driving && g.requestExitCar) g.requestExitCar();
-    g.player.teleport(HOSPITAL.x, HOSPITAL.z);
-  }
-
-  // ---------------- per-unit driving --------------------------------------
-  function collideBuildings(u) {
-    var p = u.group.position, r = 1.7;
-    for (var i = 0; i < city.colliders.length; i++) {
-      var b = city.colliders[i];
-      var nx = Math.max(b.minX, Math.min(p.x, b.maxX));
-      var nz = Math.max(b.minZ, Math.min(p.z, b.maxZ));
-      var dx = p.x - nx, dz = p.z - nz;
-      var d2 = dx * dx + dz * dz;
-      if (d2 < r * r) {
-        if (d2 < 1e-6) { p.x = b.maxX + r; continue; }
-        var d = Math.sqrt(d2);
-        p.x = nx + (dx / d) * r;
-        p.z = nz + (dz / d) * r;
-        u.speed *= 0.45;
-      }
+    var game = window.VC.game;
+    if (game && game.driving && game.vehicles && game.vehicles.playerCar) {
+      return game.vehicles.playerCar.group.position;
     }
-  }
-  function steer(u, tx, tz, dt, topSpeed) {
-    var p = u.group.position;
-    var dx = tx - p.x, dz = tz - p.z;
-    var dist = Math.hypot(dx, dz);
-    var desired = Math.atan2(dx, dz);
-    var diff = ((desired - u.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-    var turn = 2.4 * dt;
-    u.heading += Math.max(-turn, Math.min(turn, diff));
-    var target = dist > 55 ? topSpeed * 1.15 : dist > 18 ? topSpeed : dist > 7 ? topSpeed * 0.55 : 5;
-    if (u.holdSpeed) target = Math.min(target, u.holdSpeed); // staged for screenshots
-    if (Math.abs(diff) > 2.2) target = Math.min(target, 4); // don't charge a wall
-    var accel = target > u.speed ? 14 : 24;
-    u.speed += Math.max(-accel * dt, Math.min(accel * dt, target - u.speed));
-    p.x += Math.sin(u.heading) * u.speed * dt;
-    p.z += Math.cos(u.heading) * u.speed * dt;
-    p.x = Math.max(city.bounds.minX + 2, Math.min(city.bounds.maxX - 2, p.x));
-    p.z = Math.max(city.bounds.minZ + 2, Math.min(city.bounds.maxZ - 2, p.z));
-    u.group.rotation.y = u.heading;
-    collideBuildings(u);
-    return dist;
+    return player.position;
   }
 
-  // ---------------- staging for the chase screenshot ----------------------
-  function stageChase() {
-    var g = window.VC.game;
-    if (!g || !g.vehicles || !g.vehicles.playerCar) return;
-    var pp = g.vehicles.playerCar.group.position;
-    while (units.length < 3) makeUnit();
-    var spots = [
-      { x: pp.x + 14, z: pp.z, h: -Math.PI / 2 },
-      { x: pp.x + 25, z: pp.z + 5.5, h: -Math.PI / 2 },
-      { x: pp.x + 46, z: pp.z + 5.5, h: -Math.PI / 2 }
+  function spawnNear(unit, tp) {
+    // Pick a road point roughly 70 u from the player: try lane offsets along
+    // the two nearest centrelines, fall back to a straight offset.
+    var offs = [
+      { x: 70, z: 0 }, { x: -70, z: 0 }, { x: 0, z: 70 }, { x: 0, z: -70 },
+      { x: 50, z: 50 }, { x: -50, z: -50 }, { x: 50, z: -50 }, { x: -50, z: 50 }
     ];
-    for (var i = 0; i < 3; i++) {
-      var u = units[i];
-      u.group.position.set(spots[i].x, 0, spots[i].z);
-      u.heading = spots[i].h;
-      u.group.rotation.y = u.heading;
-      u.speed = 9.5;
-      u.holdSpeed = 10.5; // close slowly, never ram the shot
-      u.leaving = false;
+    var o = offs[Math.floor(Math.random() * offs.length)];
+    var x = tp.x + o.x, z = tp.z + o.z;
+    x = Math.max(city.bounds.minX, Math.min(city.bounds.maxX, x));
+    z = Math.max(city.bounds.minZ, Math.min(city.bounds.maxZ, z));
+    unit.group.position.set(x, 0, z);
+    unit.heading = Math.atan2(tp.x - x, tp.z - z);
+    unit.group.rotation.y = unit.heading;
+    unit.speed = 0;
+  }
+
+  // Circle-vs-AABB slide, mirroring the city collider shape {minX,...}.
+  function collide(pos, radius) {
+    var cols = city.colliders || [];
+    for (var i = 0; i < cols.length; i++) {
+      var c = cols[i];
+      var nx = Math.max(c.minX, Math.min(c.maxX, pos.x));
+      var nz = Math.max(c.minZ, Math.min(c.maxZ, pos.z));
+      var dx = pos.x - nx, dz = pos.z - nz;
+      var d2 = dx * dx + dz * dz;
+      if (d2 < radius * radius) {
+        if (d2 > 1e-6) {
+          var d = Math.sqrt(d2);
+          pos.x = nx + (dx / d) * radius;
+          pos.z = nz + (dz / d) * radius;
+        } else {
+          pos.x = c.maxX + radius;
+        }
+      }
+    }
+    pos.x = Math.max(city.bounds.minX, Math.min(city.bounds.maxX, pos.x));
+    pos.z = Math.max(city.bounds.minZ, Math.min(city.bounds.maxZ, pos.z));
+  }
+
+  function setSiren(on) {
+    if (on === sirenOn) return;
+    sirenOn = on;
+    var game = window.VC.game;
+    if (game && game.audio && typeof game.audio.sirenSet === 'function') {
+      game.audio.sirenSet(on);
     }
   }
 
-  // ---------------- main update -------------------------------------------
-  function update(dt) {
-    timeAcc += dt;
-    if (carHitCd > 0) carHitCd -= dt;
-    if (footHitCd > 0) footHitCd -= dt;
-    var g = window.VC.game;
-    if (!g || !g.player) return;
-    var tp = targetPos();
+  var police = {
+    units: units,
+    onBusted: null,
 
-    // player speed (bust checks + sequence logic)
-    if (havePrev && dt > 0) {
-      playerSpeed = Math.hypot(tp.x - prevTX, tp.z - prevTZ) / dt;
-    }
-    prevTX = tp.x; prevTZ = tp.z; havePrev = true;
-
-    // light bars flash alternately
-    var phase = Math.floor(timeAcc * 3) % 2 === 0;
-    for (var li = 0; li < units.length; li++) {
-      units[li].redMat.color.setHex(phase ? 0xff2a2a : 0x4d0d0d);
-      units[li].blueMat.color.setHex(phase ? 0x1a3a8f : 0x2f7bff);
-    }
-
-    // sequence (busted / wasted) freezes the law until it plays out
-    if (seqT > 0) {
-      seqT -= dt;
-      for (var si = 0; si < units.length; si++) {
-        units[si].speed = Math.max(0, units[si].speed - 20 * dt);
-        var sp = units[si].group.position;
-        sp.x += Math.sin(units[si].heading) * units[si].speed * dt;
-        sp.z += Math.cos(units[si].heading) * units[si].speed * dt;
+    update: function (dt) {
+      sinceCrime += dt;
+      if (sinceCrime > DECAY_DELAY && state.wanted > 0) {
+        state.wanted = Math.max(0, state.wanted - DECAY_RATE * dt);
+        if (state.wanted < 1 && state.wanted > 0) state.wanted = 0;
       }
-      if (seqT <= 0) endSequence();
-      return;
-    }
 
-    if (state.health <= 0) { doWasted(); return; }
+      var want = activeCount();
+      var tp = targetPos();
+      var game = window.VC.game;
+      var driving = !!(game && game.driving);
+      var anyClose = false;
+      lightPhase += dt * 6;
 
-    // field one unit per whole star
-    var desired = Math.min(MAX_UNITS, Math.round(state.wanted));
-    while (units.length < desired) {
-      var nu = makeUnit();
-      var s = spawnPosFor(tp);
-      nu.group.position.set(s.x, 0, s.z);
-      nu.heading = Math.atan2(tp.x - s.x, tp.z - s.z);
-      nu.group.rotation.y = nu.heading;
-    }
-    // surplus units leave when the heat drops
-    for (var ui = units.length - 1; ui >= 0; ui--) {
-      var un = units[ui];
-      if (ui >= desired && !un.leaving) { un.leaving = true; un.leaveT = 0; }
-      if (un.leaving) {
-        un.leaveT += dt;
-        var lp = un.group.position;
-        var away = Math.atan2(lp.x - tp.x, lp.z - tp.z);
-        steer(un, lp.x + Math.sin(away) * 30, lp.z + Math.cos(away) * 30, dt, 16);
-        var ld = Math.hypot(lp.x - tp.x, lp.z - tp.z);
-        if (ld > 115 || un.leaveT > 20) removeUnit(un);
+      for (var i = 0; i < units.length; i++) {
+        var unit = units[i];
+        var shouldBeActive = i < want;
+        if (shouldBeActive && !unit.active) {
+          unit.active = true;
+          unit.group.visible = true;
+          spawnNear(unit, tp);
+        } else if (!shouldBeActive && unit.active) {
+          unit.active = false;
+          unit.group.visible = false;
+          unit.speed = 0;
+          unit.group.position.set(depots[i].x, 0, depots[i].z);
+        }
+        if (!unit.active) continue;
+
+        // Flash the light bar.
+        var phase = (Math.sin(lightPhase + i) > 0);
+        unit.redMat.emissive.setHex(phase ? 0xff2020 : 0x330000);
+        unit.blueMat.emissive.setHex(phase ? 0x330000 : 0x2040ff);
+
+        var pos = unit.group.position;
+        var dx = tp.x - pos.x, dz = tp.z - pos.z;
+        var dist = Math.sqrt(dx * dx + dz * dz);
+        var desired = Math.atan2(dx, dz);
+        var diff = desired - unit.heading;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        unit.heading += Math.max(-2.4 * dt, Math.min(2.4 * dt, diff));
+        unit.group.rotation.y = unit.heading;
+
+        var targetSpeed = MAX_SPEED;
+        if (dist < 10) targetSpeed = MAX_SPEED * (dist / 10) + 4;
+        if (dist < 3.2) targetSpeed = 0; // nose to nose: hold
+        if (unit.speed < targetSpeed) unit.speed = Math.min(targetSpeed, unit.speed + 18 * dt);
+        else unit.speed = Math.max(targetSpeed, unit.speed - 30 * dt);
+
+        pos.x += Math.sin(unit.heading) * unit.speed * dt;
+        pos.z += Math.cos(unit.heading) * unit.speed * dt;
+        collide(pos, 1.6);
+
+        if (!driving && dist < BUST_RANGE) anyClose = true;
       }
-    }
 
-    // pursuit
-    var nearest = Infinity;
-    var veh = g.vehicles;
-    for (var i = 0; i < units.length; i++) {
-      var u = units[i];
-      if (u.leaving) continue;
-      var d = steer(u, tp.x, tp.z, dt, 23);
-      if (d < nearest) nearest = d;
+      setSiren(want > 0);
 
-      // soft push-apart vs traffic / parked cars
-      if (veh && veh.cars) {
-        for (var ci = 0; ci < veh.cars.length; ci++) {
-          var oc = veh.cars[ci];
-          if (veh.playerCar === oc) continue;
-          var op = oc.group.position, upos = u.group.position;
-          var odx = upos.x - op.x, odz = upos.z - op.z;
-          var od2 = odx * odx + odz * odz;
-          if (od2 < 3.2 * 3.2 && od2 > 1e-6) {
-            var od = Math.sqrt(od2);
-            upos.x = op.x + (odx / od) * 3.2;
-            upos.z = op.z + (odz / od) * 3.2;
+      // Bust logic: only on foot, sustained close contact.
+      if (!driving && want > 0 && anyClose) {
+        bustTimer += dt;
+        if (bustTimer >= BUST_TIME) {
+          bustTimer = 0;
+          for (var k = 0; k < units.length; k++) {
+            units[k].active = false;
+            units[k].group.visible = false;
+            units[k].speed = 0;
           }
-        }
-      }
-    }
-
-    // contact consequences
-    if (g.driving && veh && veh.playerCar) {
-      var pc = veh.playerCar;
-      for (var hi = 0; hi < units.length; hi++) {
-        var hu = units[hi];
-        if (hu.leaving) continue;
-        var hp = hu.group.position, pp2 = pc.group.position;
-        if (Math.hypot(hp.x - pp2.x, hp.z - pp2.z) < 3.4) {
-          if (carHitCd <= 0) {
-            pc.speed *= 0.55;
-            state.damage(2);
-            carHitCd = 1;
-          }
-        }
-      }
-    } else if (state.wanted > 0) {
-      // on foot: contact hurts, standing still near a cop gets you busted
-      var footNear = false;
-      for (var fi = 0; fi < units.length; fi++) {
-        var fu = units[fi];
-        if (fu.leaving) continue;
-        var fp = fu.group.position;
-        var fd = Math.hypot(fp.x - tp.x, fp.z - tp.z);
-        if (fd < 7) footNear = true;
-        if (fd < 2.2 && footHitCd <= 0) {
-          state.damage(3);
-          footHitCd = 1;
-          var pushA = Math.atan2(tp.x - fp.x, tp.z - fp.z);
-          g.player.teleport(tp.x + Math.sin(pushA) * 1.1, tp.z + Math.cos(pushA) * 1.1);
-        }
-      }
-      if (footNear && playerSpeed < 1.5) {
-        bustT += dt;
-        if (bustT >= 2.5) { doBusted(); return; }
-      } else {
-        bustT = Math.max(0, bustT - dt * 1.5);
-      }
-    }
-
-    // wanted decay: unseen and quiet for a while → stars bleed off
-    if (state.wanted > 0) {
-      if (nearest > 45 && timeAcc - lastCrimeT > 12) {
-        decayT += dt;
-        if (decayT >= 10) {
-          decayT = 0;
-          state.wanted = Math.max(0, state.wanted - 0.5);
+          setSiren(false);
+          if (typeof police.onBusted === 'function') police.onBusted();
         }
       } else {
-        decayT = 0;
+        bustTimer = Math.max(0, bustTimer - dt * 1.5);
+      }
+    },
+
+    stageShotChase: function () {
+      state.wanted = 3;
+      var game = window.VC.game;
+      var carPos = null;
+      if (game && game.vehicles && typeof game.vehicles.stageShotDrive === 'function') {
+        game.vehicles.stageShotDrive();
+        if (game.vehicles.playerCar) carPos = game.vehicles.playerCar.group.position;
+      }
+      if (!carPos) carPos = player.position;
+      for (var i = 0; i < units.length; i++) {
+        var unit = units[i];
+        if (i < 2) {
+          unit.active = true;
+          unit.group.visible = true;
+          unit.group.position.set(carPos.x - 4 + i * 8, 0, carPos.z + 11 + i * 3);
+          unit.heading = Math.PI;
+          unit.group.rotation.y = Math.PI;
+          unit.speed = 18;
+          unit.redMat.emissive.setHex(0xff2020);
+          unit.blueMat.emissive.setHex(0x2040ff);
+        } else {
+          unit.active = false;
+          unit.group.visible = false;
+        }
       }
     }
+  };
 
-    audio.sirenSet(state.wanted > 0 && nearest < 55);
-  }
-
-  return { update: update, units: units, stageChase: stageChase };
+  return police;
 };
