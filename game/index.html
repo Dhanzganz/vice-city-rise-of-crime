@@ -3,49 +3,36 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VICE CITY: Rise of Crime</title>
+<title>Vice City: Rise of Crime</title>
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #0a0e24; height: 100%; }
-  #game { display: block; width: 100vw; height: 100vh; touch-action: none; }
-  .hud { position: fixed; z-index: 5; pointer-events: none; font-family: "Segoe UI", Arial, sans-serif; }
-  #title { top: 22px; left: 26px; color: #fff; }
-  #title .big {
-    font-size: 44px; font-weight: 800; letter-spacing: 6px; line-height: 1;
-    background: linear-gradient(92deg, #ffd93c 10%, #ff5e8a 55%, #3ec1d3 100%);
-    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55));
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #07060f; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+  .vc-hint-bar {
+    position: fixed; left: 10px; bottom: 8px; z-index: 5;
+    color: rgba(255,255,255,0.55); font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 12px; pointer-events: none;
   }
-  #title .sub { font-size: 15px; font-weight: 600; letter-spacing: 9px; color: #ffe9f2; text-shadow: 0 1px 4px rgba(0,0,0,0.7); margin-top: 4px; }
-  #hint {
-    left: 26px; bottom: 20px; color: #eaf6ff; font-size: 13px; letter-spacing: 1px;
-    background: rgba(8, 12, 28, 0.45); padding: 8px 12px; border-radius: 8px;
-    border: 1px solid rgba(255,255,255,0.18); text-shadow: 0 1px 3px rgba(0,0,0,0.8);
-  }
-  #hint b { color: #ffd93c; font-weight: 700; }
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
-<div class="hud" id="title">
-  <div class="big">VICE CITY</div>
-  <div class="sub">RISE OF CRIME</div>
-</div>
-<div class="hud" id="hint"><b>WASD</b> move &nbsp;·&nbsp; <b>SHIFT</b> sprint &nbsp;·&nbsp; <b>SPACE</b> jump &nbsp;·&nbsp; <b>DRAG</b> orbit camera &nbsp;·&nbsp; <b>WHEEL</b> zoom</div>
+<div id="app"></div>
+<div class="vc-hint-bar">Click the game to capture the mouse</div>
 <script src="vendor/three.min.js"></script>
 <script src="src/random.js"></script>
-<script src="src/state.js"></script>
 <script src="src/engine.js"></script>
 <script src="src/city.js"></script>
+<script src="src/input.js"></script>
+<script src="src/player.js"></script>
+<script src="src/state.js"></script>
 <script src="src/vehicles.js"></script>
 <script src="src/npc.js"></script>
 <script src="src/audio.js"></script>
 <script src="src/hud.js"></script>
-<script src="src/combat.js"></script>
 <script src="src/police.js"></script>
+<script src="src/combat.js"></script>
 <script src="src/menu.js"></script>
 <script src="src/missions.js"></script>
-<script src="src/player.js"></script>
-<script src="src/input.js"></script>
 <script src="src/main.js"></script>
 </body>
 </html>
